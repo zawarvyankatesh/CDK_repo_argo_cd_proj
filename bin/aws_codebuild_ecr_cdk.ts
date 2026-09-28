@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
-import { TaskboardCiStack } from '../lib/taskboard-ci-stack';
+import { TaskboardCiStack } from '../lib/aws_codebuild_ecr_cdk-stack';
 
 const app = new cdk.App();
 
