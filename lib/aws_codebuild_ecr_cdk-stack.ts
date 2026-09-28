@@ -121,7 +121,7 @@ export class TaskboardCiStack extends cdk.Stack {
     }));
     project.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ecr:DescribeImages'],
-      resources: [web.repositoryArn, api.repositoryArn],
+      resources: [web.repositoryArn, api.repositoryArn, redis.repositoryArn],
     }));
 
     new cdk.CfnOutput(this, 'ProjectName', { value: project.projectName });
