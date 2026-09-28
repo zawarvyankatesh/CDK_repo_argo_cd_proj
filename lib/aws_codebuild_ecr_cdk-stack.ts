@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 export class TaskboardCiStack extends cdk.Stack {
@@ -27,6 +28,14 @@ export class TaskboardCiStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // This existing secret contains a GitHub PAT with Contents read/write on
+    // the separate GitOps repository. Its value never enters the CDK template.
+    const gitopsTokenName = this.node.tryGetContext('gitopsTokenSecretName')
+      || 'taskboard/github-gitops-write-token';
+    const gitopsToken = secretsmanager.Secret.fromSecretNameV2(
+      this, 'GitOpsWriteToken', gitopsTokenName,
+    );
+
     // The build commands live here: the application repository only needs its
     // frontend/ and backend/ Dockerfiles. No extra S3 artifact bucket is needed.
     const buildSpec = codebuild.BuildSpec.fromObject({
@@ -42,6 +51,7 @@ export class TaskboardCiStack extends cdk.Stack {
             'aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"',
             'python3 -m py_compile backend/app.py',
             'node --check frontend/app.js',
+            'python3 -m unittest discover -s scripts -p "test_*.py"',
           ],
         },
         build: {
@@ -54,9 +64,14 @@ export class TaskboardCiStack extends cdk.Stack {
         },
         post_build: {
           commands: [
+            'test "$CODEBUILD_BUILD_SUCCEEDING" = 1',
             'aws ecr describe-images --repository-name taskboard-web --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1 || docker push "$WEB_REPOSITORY_URI:$IMAGE_TAG"',
             'aws ecr describe-images --repository-name taskboard-api --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1 || docker push "$API_REPOSITORY_URI:$IMAGE_TAG"',
             'docker push "$REDIS_REPOSITORY_URI:7-alpine"',
+            'aws ecr describe-images --repository-name taskboard-web --image-ids imageTag="$IMAGE_TAG" >/dev/null',
+            'aws ecr describe-images --repository-name taskboard-api --image-ids imageTag="$IMAGE_TAG" >/dev/null',
+            'aws ecr describe-images --repository-name taskboard-redis --image-ids imageTag=7-alpine >/dev/null',
+            'python3 scripts/publish_gitops.py',
             'echo "Published web and API tag $IMAGE_TAG, plus Redis tag 7-alpine"',
           ],
         },
@@ -65,7 +80,8 @@ export class TaskboardCiStack extends cdk.Stack {
 
     const project = new codebuild.Project(this, 'BuildAndPublish', {
       projectName: 'taskboard-build-and-publish',
-      description: 'Builds web and API images and mirrors Redis to private ECR',
+      description: 'Builds images in ECR and promotes successful builds to GitOps',
+      concurrentBuildLimit: 1,
       source: codebuild.Source.gitHub({
         owner: 'zawarvyankatesh',
         repo: 'application_code_argocd_project',
@@ -87,6 +103,10 @@ export class TaskboardCiStack extends cdk.Stack {
           API_REPOSITORY_URI: { value: api.repositoryUri },
           REDIS_REPOSITORY_URI: { value: redis.repositoryUri },
           ECR_REGISTRY: { value: `${this.account}.dkr.ecr.${this.region}.amazonaws.com` },
+          GITOPS_GITHUB_TOKEN: {
+            value: gitopsToken.secretName,
+            type: codebuild.BuildEnvironmentVariableType.SECRETS_MANAGER,
+          },
         },
       },
     });
@@ -94,6 +114,7 @@ export class TaskboardCiStack extends cdk.Stack {
     for (const repository of [web, api, redis]) {
       repository.grantPullPush(project);
     }
+    gitopsToken.grantRead(project);
     project.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ecr:GetAuthorizationToken'],
       resources: ['*'], // ECR requires this token action at registry scope.
